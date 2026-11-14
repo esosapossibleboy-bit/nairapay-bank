@@ -1,18 +1,22 @@
 from typing import Optional
 from fastapi import FastAPI, HTTPException, Header, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from db_adapter import get_db_connection
 from opay_auth import auth_router, get_current_bank_user
+from opay_beneficiaries import (
+    get_existing_transfer,
+    record_idempotency_key,
+    save_beneficiary,
+)
 from opay_db import (
     deposit_funds,
-    get_wallet_dashboard,
     init_opay_db,
     lookup_account_name,
     pay_bill,
     transfer_p2p,
 )
-from opay_pdf import build_bank_statement_pdf
+from opay_features_router import features_router, full_dashboard
 from opay_ui import render_opay_page
 from rate_limiter import RateLimiter
 
@@ -20,6 +24,7 @@ app = FastAPI(title="NairaPay Microfinance Bank")
 BANK_DB = "nairapay.db"
 tx_limiter = RateLimiter(max_requests=40)
 app.include_router(auth_router)
+app.include_router(features_router)
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
@@ -31,6 +36,7 @@ async def security_headers(request: Request, call_next):
 
 class DepositRequest(BaseModel):
     amount: float = Field(gt=0, le=50_000_000)
+    pin: str = Field(pattern=r"^\d{4}$")
     timestamp: Optional[str] = Field(default=None, max_length=70)
 
 class TransferRequest(BaseModel):
@@ -39,6 +45,7 @@ class TransferRequest(BaseModel):
     pin: str = Field(pattern=r"^\d{4}$")
     narration: str = Field(default="Transfer", max_length=60)
     timestamp: Optional[str] = Field(default=None, max_length=70)
+    idempotency_key: Optional[str] = Field(default=None, max_length=64)
 
 class BillRequest(BaseModel):
     service: str = Field(min_length=2, max_length=40)
@@ -56,7 +63,7 @@ def api_wallet(authorization: Optional[str] = Header(None)):
     user = get_current_bank_user(authorization)
     conn = get_db_connection(BANK_DB)
     init_opay_db(conn)
-    dash = get_wallet_dashboard(conn, user["user_id"])
+    dash = full_dashboard(conn, user["user_id"])
     conn.close()
     return dash
 
@@ -76,8 +83,11 @@ def api_deposit(req: DepositRequest, authorization: Optional[str] = Header(None)
     user = get_current_bank_user(authorization)
     conn = get_db_connection(BANK_DB)
     init_opay_db(conn)
-    deposit_funds(conn, user["user_id"], req.amount, "Instant Bank Top-Up", req.timestamp)
-    dash = get_wallet_dashboard(conn, user["user_id"])
+    res = deposit_funds(conn, user["user_id"], req.amount, "Instant Bank Top-Up", req.timestamp, req.pin)
+    if not res["ok"]:
+        conn.close()
+        raise HTTPException(status_code=400, detail=res["error"])
+    dash = full_dashboard(conn, user["user_id"])
     conn.close()
     return dash
 
@@ -88,11 +98,21 @@ def api_transfer(req: TransferRequest, authorization: Optional[str] = Header(Non
         raise HTTPException(status_code=429, detail="Too many transfers. Slow down.")
     conn = get_db_connection(BANK_DB)
     init_opay_db(conn)
+
+    existing_ref = get_existing_transfer(conn, user["user_id"], req.idempotency_key)
+    if existing_ref:
+        dash = full_dashboard(conn, user["user_id"])
+        conn.close()
+        return {"reference": existing_ref, "dashboard": dash}
+
     result = transfer_p2p(conn, user["user_id"], req.recipient_account, req.amount, req.pin, req.narration, req.timestamp)
     if not result["ok"]:
         conn.close()
         raise HTTPException(status_code=400, detail=result["error"])
-    dash = get_wallet_dashboard(conn, user["user_id"])
+
+    save_beneficiary(conn, user["user_id"], result["recipient_name"], req.recipient_account)
+    record_idempotency_key(conn, user["user_id"], req.idempotency_key, result["reference"])
+    dash = full_dashboard(conn, user["user_id"])
     conn.close()
     return {"reference": result["reference"], "dashboard": dash}
 
@@ -105,20 +125,6 @@ def api_bills(req: BillRequest, authorization: Optional[str] = Header(None)):
     if not result["ok"]:
         conn.close()
         raise HTTPException(status_code=400, detail=result["error"])
-    dash = get_wallet_dashboard(conn, user["user_id"])
+    dash = full_dashboard(conn, user["user_id"])
     conn.close()
     return {"reference": result["reference"], "dashboard": dash}
-
-@app.get("/wallet/statement/pdf")
-def api_statement_pdf(authorization: Optional[str] = Header(None)):
-    user = get_current_bank_user(authorization)
-    conn = get_db_connection(BANK_DB)
-    init_opay_db(conn)
-    dash = get_wallet_dashboard(conn, user["user_id"])
-    conn.close()
-    pdf_bytes = build_bank_statement_pdf(dash)
-    return Response(
-        content=pdf_bytes,
-        media_type="application/pdf",
-        headers={"Content-Disposition": 'attachment; filename="nairapay_statement.pdf"'},
-    )

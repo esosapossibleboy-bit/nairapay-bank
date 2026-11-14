@@ -18,11 +18,12 @@ def test_full_nairapay_banking_flow(monkeypatch):
     esosa_h = {"Authorization": f"Bearer {esosa['token']}"}
     tunde_h = {"Authorization": f"Bearer {tunde['token']}"}
 
-    # 2. Verify recipient lookup & top-up N50,000
+    # 2. Verify recipient lookup & PIN-protected top-up of N50,000
     lookup = client.get(f"/wallet/lookup/{tunde['account_number']}", headers=esosa_h).json()
     assert lookup["full_name"] == "Tunde Bakare"
 
-    topup = client.post("/wallet/deposit", headers=esosa_h, json={"amount": 50000}).json()
+    assert client.post("/wallet/deposit", headers=esosa_h, json={"amount": 50000, "pin": "0000"}).status_code == 400
+    topup = client.post("/wallet/deposit", headers=esosa_h, json={"amount": 50000, "pin": "1234"}).json()
     assert topup["balance_naira"] == 50000.0
 
     # 3. Wrong PIN is blocked; valid P2P transfer of N15,000 succeeds atomically
@@ -34,11 +35,15 @@ def test_full_nairapay_banking_flow(monkeypatch):
     assert ok.json()["dashboard"]["balance_naira"] == 35000.0
     assert client.get("/wallet", headers=tunde_h).json()["balance_naira"] == 15000.0
 
-    # 4. Pay N2,000 MTN Airtime bill & download PDF statement
-    bill = client.post("/wallet/bills", headers=esosa_h, json={"service": "MTN Airtime", "target": "08012345678", "amount": 2000, "pin": "1234"})
+    # 4. Change PIN from 1234 to 4321 using account password, then pay N2,000 Airtime bill
+    assert client.post("/auth/change-pin", headers=esosa_h, json={"password": "WrongPassword!", "new_pin": "4321"}).status_code == 400
+    assert client.post("/auth/change-pin", headers=esosa_h, json={"password": "Password123!", "new_pin": "4321"}).status_code == 200
+
+    bill = client.post("/wallet/bills", headers=esosa_h, json={"service": "MTN Airtime", "target": "08012345678", "amount": 2000, "pin": "4321"})
     assert bill.status_code == 200
     assert bill.json()["dashboard"]["balance_naira"] == 33000.0
 
+    # 5. Download PDF statement
     pdf = client.get("/wallet/statement/pdf", headers=esosa_h)
     assert pdf.status_code == 200
     assert pdf.content.startswith(b"%PDF")

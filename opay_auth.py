@@ -5,7 +5,12 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Header, Request
 from pydantic import BaseModel, Field, field_validator
 from db_adapter import get_db_connection
-from opay_db import authenticate_bank_user, create_bank_account, init_opay_db
+from opay_db import (
+    authenticate_bank_user,
+    change_transaction_pin,
+    create_bank_account,
+    init_opay_db,
+)
 from rate_limiter import RateLimiter
 
 auth_router = APIRouter()
@@ -29,6 +34,10 @@ class BankRegisterRequest(BaseModel):
 class BankLoginRequest(BaseModel):
     email: str = Field(min_length=4, max_length=120)
     password: str = Field(min_length=1, max_length=128)
+
+class ChangePinRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=128)
+    new_pin: str = Field(pattern=r"^\d{4}$")
 
 def get_db():
     import opay_server
@@ -83,6 +92,17 @@ def api_login(req: BankLoginRequest, request: Request):
     if not user:
         raise HTTPException(status_code=401, detail="Invalid email or password")
     return create_bank_session(user)
+
+@auth_router.post("/auth/change-pin")
+def api_change_pin(req: ChangePinRequest, authorization: Optional[str] = Header(None)):
+    user = get_current_bank_user(authorization)
+    conn = get_db()
+    init_opay_db(conn)
+    res = change_transaction_pin(conn, user["user_id"], req.password, req.new_pin)
+    conn.close()
+    if not res["ok"]:
+        raise HTTPException(status_code=400, detail=res["error"])
+    return {"status": "pin_updated"}
 
 @auth_router.post("/auth/logout")
 def api_logout(authorization: Optional[str] = Header(None)):

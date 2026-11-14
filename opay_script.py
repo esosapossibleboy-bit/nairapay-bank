@@ -1,11 +1,15 @@
-OPAY_JS = """
-<script>
-    let token = localStorage.getItem("opay_token") || "", idleTimer = null;
+from opay_card_js import CARD_AND_RENDER_JS
+
+CORE_BANK_JS = """
+    let token = localStorage.getItem("opay_token") || "", idleTimer = null, isRegisterMode = false;
     const IDLE_MS = 10 * 60 * 1000;
     const headers = () => ({ "Content-Type": "application/json", "Authorization": "Bearer " + token });
     function getLocalTime() {
         const d = new Date(), tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "Africa/Lagos";
         return d.toLocaleString("en-GB", { day:"2-digit", month:"short", year:"numeric", hour:"2-digit", minute:"2-digit" }) + ` (${tz})`;
+    }
+    function makeIdemKey() {
+        return (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ("idem-" + Date.now() + "-" + Math.random().toString(36).slice(2));
     }
     function resetIdle() {
         if (!token) return;
@@ -14,9 +18,24 @@ OPAY_JS = """
         idleTimer = setTimeout(() => logout("🔒 Auto-locked after 10 minutes of inactivity."), IDLE_MS);
     }
     ["click", "touchstart", "keydown", "scroll"].forEach(e => window.addEventListener(e, resetIdle, { passive: true }));
-    async function submitAuth(url) {
+    function toggleAuthMode() {
+        isRegisterMode = !isRegisterMode;
         authError.textContent = "";
-        const res = await fetch(url, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ full_name:nameInput.value.trim()||"Customer", email:emailInput.value.trim(), password:passInput.value, pin:pinInput.value }) });
+        nameInput.value = emailInput.value = passInput.value = pinInput.value = "";
+        registerFields.style.display = isRegisterMode ? "block" : "none";
+        registerPinBox.style.display = isRegisterMode ? "block" : "none";
+        authTitle.textContent = isRegisterMode ? "🏦 Create Free Bank Account" : "🔐 Log In to NairaPay";
+        passInput.placeholder = isRegisterMode ? "Create Strong Password (8+ chars, A-z, 0-9, !@#)" : "Password";
+        primaryAuthBtn.textContent = isRegisterMode ? "Create Free Bank Account" : "Log In";
+        toggleAuthBtn.textContent = isRegisterMode ? "Already have an account? Log In" : "New user? Create Free Account";
+    }
+    async function submitAuth() {
+        authError.textContent = "";
+        const url = isRegisterMode ? "/auth/register" : "/auth/login";
+        const payload = isRegisterMode
+            ? { full_name:nameInput.value.trim(), email:emailInput.value.trim(), password:passInput.value, pin:pinInput.value }
+            : { email:emailInput.value.trim(), password:passInput.value };
+        const res = await fetch(url, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload) });
         const data = await res.json();
         if (!res.ok) return authError.textContent = Array.isArray(data.detail) ? data.detail.map(x => x.msg).join(", ") : (data.detail || "Auth error");
         token = data.token; localStorage.setItem("opay_token", token);
@@ -44,14 +63,18 @@ OPAY_JS = """
         if (res.ok) { const d = await res.json(); recipNamePreview.textContent = "✅ Verified Recipient: " + d.full_name; }
         else recipNamePreview.textContent = "❌ Account number not found";
     }
+    function selectBeneficiary(acct) { recipAcct.value = acct; checkRecipient(); }
     async function topUpWallet() {
-        billMsg.textContent = "";
-        const res = await fetch("/wallet/deposit", { method:"POST", headers:headers(), body:JSON.stringify({ amount:parseFloat(topupAmount.value), timestamp:getLocalTime() }) });
-        if (res.ok) { topupAmount.value = ""; renderWallet(await res.json()); }
+        billMsg.className = "error"; billMsg.textContent = "";
+        const res = await fetch("/wallet/deposit", { method:"POST", headers:headers(), body:JSON.stringify({ amount:parseFloat(topupAmount.value), pin:topupPin.value, timestamp:getLocalTime() }) });
+        const data = await res.json();
+        if (!res.ok) return billMsg.textContent = data.detail || "Top-up failed";
+        billMsg.className = "success"; billMsg.textContent = "✅ Wallet Top-Up Successful";
+        topupAmount.value = topupPin.value = ""; renderWallet(data);
     }
     async function sendMoney() {
         sendMsg.className = "error"; sendMsg.textContent = "";
-        const res = await fetch("/wallet/transfer", { method:"POST", headers:headers(), body:JSON.stringify({ recipient_account:recipAcct.value.trim(), amount:parseFloat(sendAmount.value), pin:sendPin.value, narration:sendNote.value, timestamp:getLocalTime() }) });
+        const res = await fetch("/wallet/transfer", { method:"POST", headers:headers(), body:JSON.stringify({ recipient_account:recipAcct.value.trim(), amount:parseFloat(sendAmount.value), pin:sendPin.value, narration:sendNote.value, timestamp:getLocalTime(), idempotency_key:makeIdemKey() }) });
         const data = await res.json();
         if (!res.ok) return sendMsg.textContent = data.detail || "Transfer failed";
         sendMsg.className = "success"; sendMsg.textContent = `✅ Sent ₦${Number(sendAmount.value).toLocaleString()} (${data.reference})`;
@@ -67,31 +90,32 @@ OPAY_JS = """
         billTarget.value = billAmount.value = billPin.value = "";
         renderWallet(data.dashboard);
     }
-    async function downloadStatement() {
-        const res = await fetch("/wallet/statement/pdf", { headers:headers() });
-        if (!res.ok) return;
-        const blob = await res.blob(), url = URL.createObjectURL(blob);
-        const a = Object.assign(document.createElement("a"), { href:url, download:"nairapay_statement.pdf" });
-        document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    async function saveToVault() {
+        vaultMsg.className = "error"; vaultMsg.textContent = "";
+        const res = await fetch("/wallet/vault/save", { method:"POST", headers:headers(), body:JSON.stringify({ amount:parseFloat(vaultSaveAmt.value), pin:vaultSavePin.value, timestamp:getLocalTime() }) });
+        const data = await res.json();
+        if (!res.ok) return vaultMsg.textContent = data.detail || "Save failed";
+        vaultMsg.className = "success"; vaultMsg.textContent = `✅ Saved (${data.reference})`;
+        vaultSaveAmt.value = vaultSavePin.value = ""; renderWallet(data.dashboard);
     }
-    function renderWallet(d) {
-        holderName.textContent = "👋 " + d.full_name;
-        acctNumText.textContent = d.account_number;
-        balanceText.textContent = "₦" + d.balance_naira.toLocaleString("en-NG", { minimumFractionDigits:2, maximumFractionDigits:2 });
-        txList.replaceChildren(...d.transactions.map(tx => {
-            const row = Object.assign(document.createElement("div"), { className:"tx-row" });
-            const left = document.createElement("div");
-            left.append(
-                Object.assign(document.createElement("div"), { textContent:`${tx.counterparty} — ${tx.narration}` }),
-                Object.assign(document.createElement("small"), { textContent:`${tx.reference} • ${tx.created_at}`, style:"color:#94a3b8;" })
-            );
-            const amt = Object.assign(document.createElement("span"), {
-                className: tx.type === "CREDIT" ? "credit" : "debit",
-                textContent: `${tx.type === "CREDIT" ? "+" : "-"}₦${tx.amount_naira.toLocaleString("en-NG", { minimumFractionDigits:2 })}`
-            });
-            row.append(left, amt); return row;
-        }));
+    async function earnInterest() {
+        const pin = prompt("Enter your 4-digit Transaction PIN to simulate 30-day 15% interest:");
+        if (!pin) return;
+        vaultMsg.className = "error"; vaultMsg.textContent = "";
+        const res = await fetch("/wallet/vault/interest", { method:"POST", headers:headers(), body:JSON.stringify({ pin }) });
+        const data = await res.json();
+        if (!res.ok) return vaultMsg.textContent = data.detail || "Interest error";
+        vaultMsg.className = "success"; vaultMsg.textContent = `🌟 30-Day 15% Interest Credited (${data.reference})`;
+        renderWallet(data.dashboard);
     }
-    if (token) { authCard.style.display = "none"; bankArea.style.display = "block"; resetIdle(); loadWallet(); }
-</script>
+    async function withdrawVault() {
+        vaultMsg.className = "error"; vaultMsg.textContent = "";
+        const res = await fetch("/wallet/vault/withdraw", { method:"POST", headers:headers(), body:JSON.stringify({ amount:parseFloat(vaultWdrAmt.value), pin:vaultPin.value, timestamp:getLocalTime() }) });
+        const data = await res.json();
+        if (!res.ok) return vaultMsg.textContent = data.detail || "Withdrawal failed";
+        vaultMsg.className = "success"; vaultMsg.textContent = `✅ Withdrawn to Wallet (${data.reference})`;
+        vaultWdrAmt.value = vaultPin.value = ""; renderWallet(data.dashboard);
+    }
 """
+
+OPAY_JS = f"<script>\n{CORE_BANK_JS}\n{CARD_AND_RENDER_JS}\n</script>"
