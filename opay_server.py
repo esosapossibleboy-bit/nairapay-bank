@@ -19,6 +19,7 @@ from opay_db import (
 from opay_features_router import features_router, full_dashboard
 from opay_ui import render_opay_page
 from rate_limiter import RateLimiter
+from opay_pwa import pwa_router
 
 app = FastAPI(title="NairaPay Microfinance Bank")
 BANK_DB = "nairapay.db"

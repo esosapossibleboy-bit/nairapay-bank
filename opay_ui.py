@@ -27,7 +27,15 @@ def render_opay_page() -> str:
 <html lang="en">
 <head>
     <meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#00b875" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="NairaPay" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="apple-touch-icon" href="/icon.svg" />
     <title>NairaPay Microfinance Bank</title>{OPAY_CSS}
+    <script>if ("serviceWorker" in navigator) {{ window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js")); }}</script>
 </head>
 <body>
     <div class="container">
